@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>网页转 Markdown</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h1>📝 网页转 Markdown</h1>
+    
+    <!-- 保存路径设置 -->
+    <div class="section">
+      <label for="savePath">保存子目录：</label>
+      <div class="path-hint">文件将保存在 Chrome 下载目录下的此子目录中</div>
+      <input type="text" id="savePath" placeholder="例如: MyNotes/Articles">
+      <button id="selectPathBtn" class="btn-secondary">选择文件夹</button>
+    </div>
+
+    <!-- 加载动画区域 -->
+    <div class="section loading-section" id="loadingSection" style="display: none;">
+      <div class="loading-spinner"></div>
+      <p class="loading-text" id="loadingText">正在提取文章...</p>
+    </div>
+
+    <!-- 文章信息预览 -->
+    <div class="section" id="articleInfo" style="display: none;">
+      <h3>📄 文章信息</h3>
+      <p><strong>标题：</strong><span id="articleTitle">-</span></p>
+      <p><strong>作者：</strong><span id="articleAuthor">-</span></p>
+      <p><strong>图片数量：</strong><span id="imageCount">-</span></p>
+    </div>
+
+    <!-- 下载选项 -->
+    <div class="section" id="downloadOptions" style="display: none;">
+      <label class="checkbox-label">
+        <input type="checkbox" id="downloadImagesCheckbox" checked>
+        <span>同时下载图片到本地</span>
+      </label>
+    </div>
+
+    <!-- 操作按钮：合并为一键保存 -->
+    <div class="section actions">
+      <button id="saveBtn" class="btn-primary" disabled>
+        <span class="btn-text">一键保存为 Markdown</span>
+        <span class="btn-icon">💾</span>
+      </button>
+    </div>
+
+    <!-- 进度显示 -->
+    <div class="section" id="progressSection" style="display: none;">
+      <div class="progress-steps" id="progressSteps">
+        <div class="step active" data-step="extract">
+          <span class="step-icon">🔍</span>
+          <span class="step-text">提取</span>
+        </div>
+        <div class="step" data-step="download">
+          <span class="step-icon">📥</span>
+          <span class="step-text">下载图片</span>
+        </div>
+        <div class="step" data-step="save">
+          <span class="step-icon">💾</span>
+          <span class="step-text">保存</span>
+        </div>
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+      <p class="progress-text" id="progressText">准备中...</p>
+    </div>
+
+    <!-- Toast 通知容器 -->
+    <div id="toastContainer"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
