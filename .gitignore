@@ -1,0 +1,40 @@
+# 系统文件
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# IDE 配置
+.vscode/
+.idea/
+*.iml
+
+# 日志和临时文件
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+
+# 打包和分发文件（构建产物）
+*.zip
+*.crx
+*.pem
+dist/
+build/
+release/
+
+# 依赖目录（如果有）
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# 测试相关
+coverage/
+.nyc_output/
+
+# 环境变量文件（如果将来有）
+.env
+.env.local
+.env.*.local
