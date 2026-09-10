@@ -35,28 +35,18 @@ async function saveMarkdownFile(data) {
     const relativeFileName = getRelativeDownloadPath(fileName);
     console.log('[保存文件] 转换后的相对路径:', relativeFileName);
     
-    // 使用 Chrome Downloads API 下载文件
-    const downloadId = await chrome.downloads.download({
+    // 使用 Chrome Downloads API 下载文件，并等待下载完成
+    const downloadResult = await downloadAndWait({
       url: dataUrl,
       filename: relativeFileName,
       saveAs: false
     });
-    
-    // 监听下载完成
-    return new Promise((resolve, reject) => {
-      chrome.downloads.onChanged.addListener(function onChanged(delta) {
-        if (delta.id === downloadId) {
-          if (delta.state && delta.state.current === 'complete') {
-            chrome.downloads.onChanged.removeListener(onChanged);
-            resolve({ downloadId, fileName });
-          }
-          if (delta.error) {
-            chrome.downloads.onChanged.removeListener(onChanged);
-            reject(new Error('下载失败: ' + delta.error.current));
-          }
-        }
-      });
-    });
+
+    if (!downloadResult.success) {
+      throw new Error('下载失败: ' + downloadResult.error);
+    }
+
+    return { downloadId: downloadResult.downloadId, fileName };
   } catch (error) {
     console.error('保存 Markdown 文件失败:', error);
     throw error;
@@ -122,20 +112,17 @@ async function downloadImages(data) {
     console.log(`[下载图片] 第 ${i + 1} 张图片路径:`, fullPath);
     
     try {
-      const downloadId = await chrome.downloads.download({
+      const downloadResult = await downloadAndWait({
         url: image.originalUrl,
         filename: fullPath,
         saveAs: false
       });
       
-      // 等待下载完成
-      const downloadResult = await waitForDownload(downloadId);
-      
       results.push({
         index: image.index,
         originalUrl: image.originalUrl,
         fileName: fileName,
-        downloadId: downloadId,
+        downloadId: downloadResult.downloadId,
         status: downloadResult.success ? 'success' : 'failed',
         error: downloadResult.error
       });
@@ -164,35 +151,71 @@ async function downloadImages(data) {
 }
 
 /**
- * 等待下载完成
- * @param {number} downloadId - 下载 ID
- * @returns {Promise<{success: boolean, error?: string}>}
+ * 发起下载并等待完成
+ *
+ * 注册监听器必须先于调用 downloads.download。data URL（例如 Markdown）
+ * 可能在返回下载 ID 前就完成，否则会错过 onChanged 事件。
+ * @param {Object} options - Chrome Downloads API 的下载参数
+ * @returns {Promise<{downloadId: number, success: boolean, error?: string}>}
  */
-function waitForDownload(downloadId) {
-  return new Promise((resolve) => {
-    const timeout = setTimeout(() => {
-      chrome.downloads.onChanged.removeListener(onChanged);
-      resolve({ success: false, error: '下载超时' });
-    }, 30000); // 30秒超时
-    
-    function onChanged(delta) {
-      if (delta.id !== downloadId) return;
-      
-      if (delta.state && delta.state.current === 'complete') {
-        clearTimeout(timeout);
-        chrome.downloads.onChanged.removeListener(onChanged);
-        resolve({ success: true });
-      }
-      
-      if (delta.error) {
-        clearTimeout(timeout);
-        chrome.downloads.onChanged.removeListener(onChanged);
-        resolve({ success: false, error: delta.error.current });
-      }
-    }
-    
-    chrome.downloads.onChanged.addListener(onChanged);
+async function downloadAndWait(options) {
+  let downloadId;
+  let timeout;
+  let settled = false;
+  let resolveDownload;
+
+  const downloadPromise = new Promise(resolve => {
+    resolveDownload = resolve;
   });
+
+  const cleanup = () => {
+    clearTimeout(timeout);
+    chrome.downloads.onChanged.removeListener(onChanged);
+  };
+
+  const finish = result => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    resolveDownload(result);
+  };
+
+  function onChanged(delta) {
+    if (downloadId === undefined || delta.id !== downloadId) return;
+
+    if (delta.state && delta.state.current === 'complete') {
+      finish({ success: true });
+      return;
+    }
+
+    if (delta.error) {
+      finish({ success: false, error: delta.error.current });
+    }
+  }
+
+  // 先监听再发起下载，避免快速完成的 data URL 丢失完成事件。
+  chrome.downloads.onChanged.addListener(onChanged);
+  timeout = setTimeout(() => {
+    finish({ success: false, error: '下载超时' });
+  }, 30000); // 30秒超时
+
+  try {
+    downloadId = await chrome.downloads.download(options);
+
+    // 兼容下载事件在 download() 返回前已经完成的情况。
+    const [download] = await chrome.downloads.search({ id: downloadId });
+    if (download?.state === 'complete') {
+      finish({ success: true });
+    } else if (download?.error) {
+      finish({ success: false, error: download.error });
+    }
+
+    const result = await downloadPromise;
+    return { downloadId, ...result };
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
 }
 
 // 安装时的初始化
