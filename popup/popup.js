@@ -171,41 +171,21 @@ async function saveMarkdown() {
 
     // 判断是否下载图片
     const shouldDownloadImages = downloadImagesCheckbox && downloadImagesCheckbox.checked;
-    let finalMarkdown = extractedArticle.markdown;
+    const hasImages = shouldDownloadImages && extractedArticle.images && extractedArticle.images.length > 0;
+    const imageFolderName = baseFileName + '_images';
+    const imageFolderPath = savePath + '/' + imageFolderName;
 
-    if (shouldDownloadImages && extractedArticle.images && extractedArticle.images.length > 0) {
-      updateProgressStep('download');
-      updateProgress(30, `正在下载 ${extractedArticle.images.length} 张图片...`);
-
-      // 创建图片文件夹名称
-      const imageFolderName = baseFileName + '_images';
-      const imageFolderPath = savePath + '/' + imageFolderName;
-
-      // 调用 background script 下载图片
-      const imageResponse = await chrome.runtime.sendMessage({
-        action: 'downloadImages',
-        data: {
-          images: extractedArticle.images,
-          savePath: imageFolderPath
-        }
-      });
-
-      if (imageResponse.success) {
-        // 更新 Markdown 中的图片链接为本地路径
-        finalMarkdown = updateMarkdownImagePaths(
+    // 图片文件名是确定的，先生成最终 Markdown，再按顺序保存 Markdown 和图片。
+    const finalMarkdown = hasImages
+      ? updateMarkdownImagePaths(
           extractedArticle.markdown,
           extractedArticle.images,
           imageFolderName
-        );
-        updateProgress(60, '图片下载完成，准备保存 Markdown...');
-      } else {
-        console.warn('图片下载失败:', imageResponse.error);
-        showToast('图片下载失败，将保存原文链接', 'warning');
-      }
-    }
+        )
+      : extractedArticle.markdown;
 
     updateProgressStep('save');
-    updateProgress(80, '正在保存文件...');
+    updateProgress(30, '正在保存 Markdown 文件...');
 
     console.log('[Web2Md] 发送保存请求，内容长度:', finalMarkdown?.length || 0);
 
@@ -221,16 +201,43 @@ async function saveMarkdown() {
 
     console.log('[Web2Md] 保存响应:', response);
 
-    if (response.success) {
-      updateProgress(100, '保存完成！');
-      showToast(`文件已保存到下载目录/${savePath}/`, 'success');
-
-      setTimeout(() => {
-        showProgress(false);
-      }, 1500);
-    } else {
+    if (!response.success) {
       throw new Error(response.error || '保存失败');
     }
+
+    // Markdown 已经保存成功后，再开始下载图片，避免图片下载阻塞 Markdown。
+    if (hasImages) {
+      updateProgressStep('download');
+      updateProgress(60, `Markdown 已保存，正在下载 ${extractedArticle.images.length} 张图片...`);
+
+      const imageResponse = await chrome.runtime.sendMessage({
+        action: 'downloadImages',
+        data: {
+          images: extractedArticle.images,
+          savePath: imageFolderPath
+        }
+      });
+
+      if (!imageResponse.success) {
+        console.warn('图片下载失败:', imageResponse.error);
+        updateProgress(100, 'Markdown 已保存，图片下载失败');
+        showToast(`Markdown 已保存到下载目录/${savePath}/，但图片下载失败`, 'warning');
+      } else if (imageResponse.data && imageResponse.data.failed > 0) {
+        const { success, total } = imageResponse.data;
+        updateProgress(100, `Markdown 已保存，图片下载完成 ${success}/${total}`);
+        showToast(`Markdown 已保存到下载目录/${savePath}/，部分图片下载失败`, 'warning');
+      } else {
+        updateProgress(100, 'Markdown 和图片都已保存！');
+        showToast(`文件已保存到下载目录/${savePath}/`, 'success');
+      }
+    } else {
+      updateProgress(100, '保存完成！');
+      showToast(`文件已保存到下载目录/${savePath}/`, 'success');
+    }
+
+    setTimeout(() => {
+      showProgress(false);
+    }, 1500);
   } catch (error) {
     showProgress(false);
     showToast('保存失败: ' + error.message, 'error');
@@ -406,11 +413,11 @@ function updateProgress(percent, text) {
 
 /**
  * 更新进度步骤
- * @param {string} stepName - 步骤名称: extract, download, save
+ * @param {string} stepName - 步骤名称: extract, save, download
  */
 function updateProgressStep(stepName) {
   const steps = document.querySelectorAll('.step');
-  const stepMap = { extract: 0, download: 1, save: 2 };
+  const stepMap = { extract: 0, save: 1, download: 2 };
   const currentIndex = stepMap[stepName];
 
   steps.forEach((step, index) => {
@@ -424,12 +431,12 @@ function updateProgressStep(stepName) {
       // 当前步骤
       step.classList.add('active');
       // 恢复原始图标
-      const icons = ['🔍', '📥', '💾'];
+      const icons = ['🔍', '💾', '📥'];
       step.querySelector('.step-icon').textContent = icons[index];
     } else {
       // 未开始步骤
       step.classList.remove('completed');
-      const icons = ['🔍', '📥', '💾'];
+      const icons = ['🔍', '💾', '📥'];
       step.querySelector('.step-icon').textContent = icons[index];
     }
   });
