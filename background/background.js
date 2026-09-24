@@ -1,21 +1,31 @@
 // 后台脚本：处理文件下载和其他后台任务
 
-// 监听来自 popup 和 content script 的消息
+// The popup submits the whole export before it can lose focus and close.
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === 'saveMarkdown') {
-    saveMarkdownFile(request.data)
-      .then(result => sendResponse({ success: true, data: result }))
-      .catch(error => sendResponse({ success: false, error: error.message }));
-    return true; // 保持消息通道开启
-  }
-  
-  if (request.action === 'downloadImages') {
-    downloadImages(request.data)
-      .then(result => sendResponse({ success: true, data: result }))
-      .catch(error => sendResponse({ success: false, error: error.message }));
-    return true;
-  }
+  if (request.action !== 'saveArticle') return;
+  saveArticle(request.data)
+    .then(data => sendResponse({ success: true, data }))
+    .catch(error => sendResponse({ success: false, error: error.message }));
+  return true;
 });
+
+async function saveArticle({ content, fileName, images, imageFolderName, imageFolderPath }) {
+  const finalMarkdown = updateMarkdownImagePaths(content, images, imageFolderName);
+  const markdown = await saveMarkdownFile({ content: finalMarkdown, fileName });
+  const imageDownloads = await downloadImages({ images, savePath: imageFolderPath });
+  return { markdown, images: imageDownloads };
+}
+
+function getImageFileName(image, index) {
+  let ext = 'jpg';
+  try {
+    const match = new URL(image.originalUrl).pathname.match(/\.(jpg|jpeg|png|gif|webp|bmp|svg)$/i);
+    if (match) ext = match[1].toLowerCase().replace(/^jpeg$/, 'jpg');
+  } catch {
+    // Let the downloads API report invalid URLs per image without aborting the batch.
+  }
+  return `image-${String(index + 1).padStart(3, '0')}.${ext}`;
+}
 
 /**
  * 保存 Markdown 文件
@@ -35,18 +45,14 @@ async function saveMarkdownFile(data) {
     const relativeFileName = getRelativeDownloadPath(fileName);
     console.log('[保存文件] 转换后的相对路径:', relativeFileName);
     
-    // 使用 Chrome Downloads API 下载文件，并等待下载完成
-    const downloadResult = await downloadAndWait({
+    // Queue the download; Chrome owns its completion even after the popup closes.
+    const downloadId = await chrome.downloads.download({
       url: dataUrl,
       filename: relativeFileName,
       saveAs: false
     });
 
-    if (!downloadResult.success) {
-      throw new Error('下载失败: ' + downloadResult.error);
-    }
-
-    return { downloadId: downloadResult.downloadId, fileName };
+    return { downloadId, fileName };
   } catch (error) {
     console.error('保存 Markdown 文件失败:', error);
     throw error;
@@ -90,29 +96,14 @@ async function downloadImages(data) {
   for (let i = 0; i < images.length; i++) {
     const image = images[i];
     
-    // 从 URL 提取文件扩展名，默认为 jpg
-    const url = image.originalUrl;
-    const urlObj = new URL(url);
-    const pathname = urlObj.pathname;
-    let ext = '.jpg';
-    const extMatch = pathname.match(/\.([a-zA-Z0-9]+)(?:\?.*)?$/);
-    if (extMatch) {
-      const foundExt = extMatch[1].toLowerCase();
-      // 只允许常见的图片格式
-      if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(foundExt)) {
-        ext = '.' + foundExt;
-        if (ext === '.jpeg') ext = '.jpg'; // 统一使用 jpg
-      }
-    }
-    
-    const fileName = `image-${String(i + 1).padStart(3, '0')}${ext}`;
-    
+    const fileName = getImageFileName(image, i);
+
     // 构建相对路径（Chrome downloads API 需要相对路径）
     const fullPath = relativeSavePath ? relativeSavePath + '/' + fileName : fileName;
     console.log(`[下载图片] 第 ${i + 1} 张图片路径:`, fullPath);
     
     try {
-      const downloadResult = await downloadAndWait({
+      const downloadId = await chrome.downloads.download({
         url: image.originalUrl,
         filename: fullPath,
         saveAs: false
@@ -122,9 +113,8 @@ async function downloadImages(data) {
         index: image.index,
         originalUrl: image.originalUrl,
         fileName: fileName,
-        downloadId: downloadResult.downloadId,
-        status: downloadResult.success ? 'success' : 'failed',
-        error: downloadResult.error
+        downloadId,
+        status: 'queued'
       });
     } catch (error) {
       console.error(`下载图片 ${image.originalUrl} 失败:`, error);
@@ -139,86 +129,51 @@ async function downloadImages(data) {
   }
   
   // 统计结果
-  const successCount = results.filter(r => r.status === 'success').length;
+  const queuedCount = results.filter(r => r.status === 'queued').length;
   const failedCount = results.filter(r => r.status === 'failed').length;
   
   return {
     total: images.length,
-    success: successCount,
+    queued: queuedCount,
     failed: failedCount,
     results: results
   };
-}
-
-/**
- * 发起下载并等待完成
- *
- * 注册监听器必须先于调用 downloads.download。data URL（例如 Markdown）
- * 可能在返回下载 ID 前就完成，否则会错过 onChanged 事件。
- * @param {Object} options - Chrome Downloads API 的下载参数
- * @returns {Promise<{downloadId: number, success: boolean, error?: string}>}
- */
-async function downloadAndWait(options) {
-  let downloadId;
-  let timeout;
-  let settled = false;
-  let resolveDownload;
-
-  const downloadPromise = new Promise(resolve => {
-    resolveDownload = resolve;
-  });
-
-  const cleanup = () => {
-    clearTimeout(timeout);
-    chrome.downloads.onChanged.removeListener(onChanged);
-  };
-
-  const finish = result => {
-    if (settled) return;
-    settled = true;
-    cleanup();
-    resolveDownload(result);
-  };
-
-  function onChanged(delta) {
-    if (downloadId === undefined || delta.id !== downloadId) return;
-
-    if (delta.state && delta.state.current === 'complete') {
-      finish({ success: true });
-      return;
-    }
-
-    if (delta.error) {
-      finish({ success: false, error: delta.error.current });
-    }
-  }
-
-  // 先监听再发起下载，避免快速完成的 data URL 丢失完成事件。
-  chrome.downloads.onChanged.addListener(onChanged);
-  timeout = setTimeout(() => {
-    finish({ success: false, error: '下载超时' });
-  }, 30000); // 30秒超时
-
-  try {
-    downloadId = await chrome.downloads.download(options);
-
-    // 兼容下载事件在 download() 返回前已经完成的情况。
-    const [download] = await chrome.downloads.search({ id: downloadId });
-    if (download?.state === 'complete') {
-      finish({ success: true });
-    } else if (download?.error) {
-      finish({ success: false, error: download.error });
-    }
-
-    const result = await downloadPromise;
-    return { downloadId, ...result };
-  } catch (error) {
-    cleanup();
-    throw error;
-  }
 }
 
 // 安装时的初始化
 chrome.runtime.onInstalled.addListener(() => {
   console.log('网页转 Markdown 插件已安装');
 });
+
+/**
+ * 更新 Markdown 中的图片链接为本地路径
+ * @param {string} markdown - 原始 Markdown 内容
+ * @param {Array} images - 图片列表（包含 originalUrl）
+ * @param {string} imageFolderName - 图片文件夹名称
+ * @returns {string} 更新后的 Markdown
+ */
+function updateMarkdownImagePaths(markdown, images, imageFolderName) {
+  let updatedMarkdown = markdown;
+
+  images.forEach((image, index) => {
+    // 生成本地图片文件名
+    const fileName = getImageFileName(image, index);
+    const localPath = `./${imageFolderName}/${fileName}`;
+
+    // 替换 Markdown 中的图片链接
+    // 支持两种格式: ![alt](url) 和 <img src="url">
+    const originalUrl = image.originalUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    // 替换 Markdown 格式的图片
+    const mdPattern = new RegExp(`!\\[(.*?)\\]\\(${originalUrl}\\)`, 'g');
+    updatedMarkdown = updatedMarkdown.replace(mdPattern, (_, alt) => `![${alt}](${localPath})`);
+
+    // 替换 HTML img 标签
+    const htmlPattern = new RegExp(`<img[^>]*src=["']${originalUrl}["'][^>]*>`, 'g');
+    updatedMarkdown = updatedMarkdown.replace(htmlPattern, (match) => {
+      return match.replace(image.originalUrl, () => localPath);
+    });
+  });
+
+  return updatedMarkdown;
+}

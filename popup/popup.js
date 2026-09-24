@@ -1,6 +1,7 @@
 // 全局变量存储提取的文章数据
 let extractedArticle = null;
 let isExtracting = false;
+let isSaving = false;
 
 // DOM 元素
 const savePathInput = document.getElementById('savePath');
@@ -147,6 +148,7 @@ saveBtn.addEventListener('click', async () => {
  * 保存 Markdown 文件
  */
 async function saveMarkdown() {
+  if (isSaving) return;
   const savePath = savePathInput.value.trim();
   if (!savePath) {
     showToast('请设置保存子目录', 'error');
@@ -156,6 +158,8 @@ async function saveMarkdown() {
   console.log('[Web2Md] 开始保存，文章数据:', extractedArticle);
   console.log('[Web2Md] Markdown内容长度:', extractedArticle.markdown?.length || 0);
 
+  isSaving = true;
+  saveBtn.disabled = true;
   try {
     showProgress(true);
     updateProgressStep('extract');
@@ -175,64 +179,32 @@ async function saveMarkdown() {
     const imageFolderName = baseFileName + '_images';
     const imageFolderPath = savePath + '/' + imageFolderName;
 
-    // 图片文件名是确定的，先生成最终 Markdown，再按顺序保存 Markdown 和图片。
-    const finalMarkdown = hasImages
-      ? updateMarkdownImagePaths(
-          extractedArticle.markdown,
-          extractedArticle.images,
-          imageFolderName
-        )
-      : extractedArticle.markdown;
-
     updateProgressStep('save');
-    updateProgress(30, '正在保存 Markdown 文件...');
+    updateProgress(30, '正在提交 Markdown 和图片下载...');
 
-    console.log('[Web2Md] 发送保存请求，内容长度:', finalMarkdown?.length || 0);
-
-    // 调用 background script 保存文件
     const response = await chrome.runtime.sendMessage({
-      action: 'saveMarkdown',
+      action: 'saveArticle',
       data: {
-        content: finalMarkdown,
-        filePath: fullPath,
-        fileName: fullPath
+        content: extractedArticle.markdown,
+        fileName: fullPath,
+        images: hasImages ? extractedArticle.images : [],
+        imageFolderName,
+        imageFolderPath
       }
     });
 
-    console.log('[Web2Md] 保存响应:', response);
-
-    if (!response.success) {
-      throw new Error(response.error || '保存失败');
+    if (!response?.success) {
+      throw new Error(response?.error || '提交下载失败');
     }
 
-    // Markdown 已经保存成功后，再开始下载图片，避免图片下载阻塞 Markdown。
-    if (hasImages) {
-      updateProgressStep('download');
-      updateProgress(60, `Markdown 已保存，正在下载 ${extractedArticle.images.length} 张图片...`);
-
-      const imageResponse = await chrome.runtime.sendMessage({
-        action: 'downloadImages',
-        data: {
-          images: extractedArticle.images,
-          savePath: imageFolderPath
-        }
-      });
-
-      if (!imageResponse.success) {
-        console.warn('图片下载失败:', imageResponse.error);
-        updateProgress(100, 'Markdown 已保存，图片下载失败');
-        showToast(`Markdown 已保存到下载目录/${savePath}/，但图片下载失败`, 'warning');
-      } else if (imageResponse.data && imageResponse.data.failed > 0) {
-        const { success, total } = imageResponse.data;
-        updateProgress(100, `Markdown 已保存，图片下载完成 ${success}/${total}`);
-        showToast(`Markdown 已保存到下载目录/${savePath}/，部分图片下载失败`, 'warning');
-      } else {
-        updateProgress(100, 'Markdown 和图片都已保存！');
-        showToast(`文件已保存到下载目录/${savePath}/`, 'success');
-      }
+    const { queued, failed, total } = response.data.images;
+    if (hasImages) updateProgressStep('download');
+    if (failed > 0) {
+      updateProgress(100, `Markdown 已提交，图片已提交 ${queued}/${total}`);
+      showToast('部分图片未能启动下载，请在 Chrome 下载记录中检查', 'warning');
     } else {
-      updateProgress(100, '保存完成！');
-      showToast(`文件已保存到下载目录/${savePath}/`, 'success');
+      updateProgress(100, '下载已提交，可关闭弹窗');
+      showToast('请在 Chrome 下载记录中查看完成状态', 'success');
     }
 
     setTimeout(() => {
@@ -242,6 +214,9 @@ async function saveMarkdown() {
     showProgress(false);
     showToast('保存失败: ' + error.message, 'error');
     console.error('保存错误:', error);
+  } finally {
+    isSaving = false;
+    saveBtn.disabled = false;
   }
 }
 
@@ -455,37 +430,4 @@ function sanitizeFileName(fileName) {
     .replace(/[<>:\"/\\|?*]/g, '_')
     .replace(/\s+/g, '_')
     .substring(0, 100) || 'untitled';
-}
-
-/**
- * 更新 Markdown 中的图片链接为本地路径
- * @param {string} markdown - 原始 Markdown 内容
- * @param {Array} images - 图片列表（包含 originalUrl）
- * @param {string} imageFolderName - 图片文件夹名称
- * @returns {string} 更新后的 Markdown
- */
-function updateMarkdownImagePaths(markdown, images, imageFolderName) {
-  let updatedMarkdown = markdown;
-
-  images.forEach((image, index) => {
-    // 生成本地图片文件名
-    const fileName = `image-${String(index + 1).padStart(3, '0')}.jpg`;
-    const localPath = `./${imageFolderName}/${fileName}`;
-
-    // 替换 Markdown 中的图片链接
-    // 支持两种格式: ![alt](url) 和 <img src="url">
-    const originalUrl = image.originalUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-    // 替换 Markdown 格式的图片
-    const mdPattern = new RegExp(`!\\[(.*?)\\]\\(${originalUrl}\\)`, 'g');
-    updatedMarkdown = updatedMarkdown.replace(mdPattern, `![$1](${localPath})`);
-
-    // 替换 HTML img 标签
-    const htmlPattern = new RegExp(`<img[^>]*src=["']${originalUrl}["'][^>]*>`, 'g');
-    updatedMarkdown = updatedMarkdown.replace(htmlPattern, (match) => {
-      return match.replace(image.originalUrl, localPath);
-    });
-  });
-
-  return updatedMarkdown;
 }

@@ -171,19 +171,7 @@ const escapedUrl = image.originalUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const regex = new RegExp(`!\\[(.*?)\\]\\(${escapedUrl}\\)`, 'g');
 ```
 
-3. **等待下载完成**：使用 `chrome.downloads.onChanged` 监听下载状态，确保每张图片都下载成功后再继续
-```javascript
-function waitForDownload(downloadId) {
-  return new Promise((resolve) => {
-    chrome.downloads.onChanged.addListener(function onChanged(delta) {
-      if (delta.id === downloadId && delta.state && delta.state.current === 'complete') {
-        chrome.downloads.onChanged.removeListener(onChanged);
-        resolve({ success: true });
-      }
-    });
-  });
-}
-```
+3. **由后台提交完整下载任务**：popup 只发送一次 `saveArticle` 消息。后台先提交 Markdown 下载，再逐一提交图片下载；`chrome.downloads.download()` 返回 ID 仅代表下载已启动，不代表文件已保存完成。不要在 popup 中等待第一阶段结束后再发送第二阶段消息，弹窗关闭会使后续代码无法执行。也不要逐张等待 `onChanged` 完成事件后才启动下一张，慢下载会阻塞整个批次。实际完成、取消或失败状态在 Chrome 下载记录中查看。
 
 4. **文件组织方式**：
 ```
